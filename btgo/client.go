@@ -45,6 +45,7 @@ func NewClient(torrentFile string, savePath string, listenPort int) (*Client, er
 	cli.AnnounceList = t.MetaInfo.AnnounceList
 	//j, _ := json.Marshal(cli.MetaInfo)
 	//fmt.Println(string(j), len(cli.MetaInfo.Info.Pieces))
+	fmt.Printf("%08b", cli.Peer.InfoHash)
 	return &cli, nil
 }
 
@@ -57,10 +58,10 @@ func (cli *Client) RequestTracker() (body []byte, err error) {
 				params := url.Values{}
 				url, err := url.Parse(announce)
 				if err != nil {
-					fmt.Println(err)
+					//fmt.Println(err)
 					continue
 				}
-				fmt.Printf("cli.Peer.InfoHash %08b",cli.Peer.InfoHash)
+				//fmt.Printf("cli.Peer.InfoHash %08b",cli.Peer.InfoHash)
 				params.Set("info_hash", string(cli.Peer.InfoHash))
 				params.Set("peer_id", string(cli.Peer.ID))
 				params.Set("port", fmt.Sprintf("%d", cli.Peer.Port))
@@ -69,7 +70,7 @@ func (cli *Client) RequestTracker() (body []byte, err error) {
 				urlPath := url.String()
 				resp, err := http.Get(urlPath)
 				if err != nil {
-					fmt.Println(err)
+					//fmt.Println(err)
 					continue
 				}
 				defer resp.Body.Close()
@@ -132,8 +133,8 @@ func (cli *Client) Run() (err error) {
 	go cli.RequestTracker()
 	go func() {
 		for peer := range InfoHashPeers[string(cli.Peer.InfoHash)] {
-			go func(){
-				//fmt.Println(peer, cli.Peer.InfoHash)
+			go func() {
+				fmt.Println(peer, cli.Peer.InfoHash)
 				cli.Peer.Connect(peer.IP.String(), strconv.Itoa(peer.Port))
 				//if err != nil {
 				//	fmt.Print(err)
@@ -147,7 +148,7 @@ func (cli *Client) Run() (err error) {
 		node.Run(cli.Peer.InfoHash)
 		//peers = InfoHashPeers[string(cli.Peer.InfoHash)]
 	}
-	go cli.Peer.Server()
+	cli.Peer.Server()
 
 	bitField, err := cli.Peer.VerifyFiles()
 	if err != nil {

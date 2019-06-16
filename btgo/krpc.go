@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/big"
 	"math/rand"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -30,9 +33,10 @@ type DistanceRange struct {
 }
 
 type Node struct {
-	ID   []byte
-	IP   net.IP
-	Port int
+	ID    []byte        `bencode:"id,omitempty"`
+	IP    net.IP        `bencode:"ip,omitempty"`
+	Port  int           `bencode:"port,omitempty"`
+	Table *RoutingTable `bencode:"table,omitempty"`
 }
 
 type Nodes []Node
@@ -42,7 +46,7 @@ func (n Nodes) Less(i, j int) bool { return bytes.Compare(n[i].ID, n[j].ID) == -
 func (n Nodes) Swap(i, j int)      { n[i], n[j] = n[j], n[i] }
 
 type KBucket struct {
-	Neighbours []Node
+	Neighbours []Node `bencode:"neighbours,omitempty"`
 }
 
 type KRPCParam struct {
@@ -76,20 +80,25 @@ type KRPCResponse struct {
 	Token []byte     `bencode:"token,omitempty"`
 }
 
-var (
-	routingTable = make([]KBucket, 160)
-)
+type RoutingTable struct {
+	Kbuckets []KBucket `bencode:"kbuckets,omitempty"`
+}
 
+func NewRoutingTable(nodeID []byte) *RoutingTable {
+	return &RoutingTable{
+		Kbuckets: make([]KBucket, 160),
+	}
+}
 
 func (b *KBucket) insert() {
 
 }
 
-func updateKBuket(nodes []Node, targetID []byte) {
+func (table *RoutingTable) updateTable(nodes []Node, targetID []byte) {
 	for _, nd := range nodes {
 		distance, _ := Distance(nd.ID, targetID)
 		index := Index(distance)
-		kBuket := routingTable[index]
+		kBuket := table.Kbuckets[index]
 		fmt.Println(" try to update kbucket")
 		if !NodeExist(kBuket.Neighbours, nd) {
 			kBuket.Neighbours = append(kBuket.Neighbours, nd)
@@ -98,24 +107,41 @@ func updateKBuket(nodes []Node, targetID []byte) {
 			if len(kBuket.Neighbours) > K {
 				kBuket.Neighbours = kBuket.Neighbours[:K]
 			}
-			routingTable[index] = kBuket
+			table.Kbuckets[index] = kBuket
 		}
 	}
 }
 
 func NewNode(nodeAddrs []NodeAddr) *Node {
+	id := GenerateID(20)
+	rTableCachePath := filepath.Join(CacheDir, "routingTable")
 	node := &Node{
-		ID: GenerateID(20),
+		ID:    id,
+		Table: NewRoutingTable(id),
+	}
+
+	if fi, err := os.Open(rTableCachePath); err == nil {
+		var c []byte
+		for {
+			buf := make([]byte, 65536)
+			n, err := fi.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+			}
+			if n < 1024 {
+				c = append(c, buf[0:n]...)
+				break
+			}
+			c = append(c, buf...)
+		}
+		err = bencode.Unmarshal(c, node)
+		fmt.Println(node, err)
 	}
 	node.Init(nodeAddrs)
 	return node
 }
-
-func (node *Node) InitRoutingTable() {
-
-}
-
-func (node *Node) UpdateRoutingTable() {}
 
 func DistanceToInt(distance []byte) (out uint64) {
 	big := &big.Int{}
@@ -200,18 +226,19 @@ func QuickSortByTargetID(nodes []Node, targetID []byte) []Node {
 	return nodes
 }
 
-func ClosedNeighbours(requestID, targetID []byte) ([]Node, error) {
+func ClosedNeighbours(table *RoutingTable, requestID, targetID []byte) ([]Node, error) {
 	distance, err := Distance(requestID, targetID)
 	if err != nil {
 		return nil, err
 	}
+	kBuckets := table.Kbuckets
 	index := Index(distance)
-	neighbours := routingTable[index].Neighbours
+	neighbours := kBuckets[index].Neighbours
 	length := len(neighbours)
 
 	for i, j := index-1, index+1; length < K; i, j = i-1, j+1 {
-		neighbours = append(neighbours, routingTable[i].Neighbours...)
-		neighbours = append(neighbours, routingTable[j].Neighbours...)
+		neighbours = append(neighbours, kBuckets[i].Neighbours...)
+		neighbours = append(neighbours, kBuckets[j].Neighbours...)
 		length = len(neighbours)
 	}
 
@@ -263,6 +290,9 @@ func Response(conn *net.UDPConn) (data []byte, err error) {
 var wg sync.WaitGroup
 
 func (node *Node) Init(boostNodes []NodeAddr) (err error) {
+	var fi *os.File
+	rTableCachePath := filepath.Join(CacheDir, "routingTable")
+	fmt.Println("xxxxxx")
 	requestedAddrs := make([]NodeAddr, 0)
 	boostNodes = append(boostNodes, BootstrapNodes()...)
 	getNodes := func(addrs []NodeAddr, targetID []byte, nodes []Node) []Node {
@@ -273,7 +303,7 @@ func (node *Node) Init(boostNodes []NodeAddr) (err error) {
 			add := make([]byte, len([]byte(addr)))
 			copy(add, []byte(addr))
 			go func() {
-				ns, _ := FindNodes(string(add), node.ID, targetID, 0)
+				ns, _ := node.FindNodes(string(add), targetID, 0)
 				nodes = append(nodes, ns...)
 			}()
 		}
@@ -299,13 +329,27 @@ func (node *Node) Init(boostNodes []NodeAddr) (err error) {
 		}
 		nodes = getNodes(addrs, targetID, nodes[:0])
 	}
+	b, err := bencode.Marshal(node)
+	if _, err := os.Stat(rTableCachePath); os.IsNotExist(err) {
+		fmt.Println(ioutil.WriteFile(rTableCachePath, b, 0666))
+	} else {
+		fi, err = os.Open(rTableCachePath)
+		fmt.Println(err)
+		defer fi.Close()
+		if err == nil {
+			_, err = fi.Write(b)
+			fmt.Println(err)
+		} else {
+			fmt.Println(err)
+		}
+	}
+	fmt.Println(node.ID)
 	return err
 }
 
-func getAllNodes(infoHash [] byte) []Node {
+func (node *Node) getAllNodes(infoHash []byte) []Node {
 	neighbours := make([]Node, 0)
-	//fmt.Println(routingTable)
-	for _, bucket := range (routingTable) {
+	for _, bucket := range node.Table.Kbuckets {
 		if len(bucket.Neighbours) != 0 {
 			neighbours = append(neighbours, bucket.Neighbours...)
 		}
@@ -317,7 +361,7 @@ func getAllNodes(infoHash [] byte) []Node {
 func (node *Node) Run(infoHash []byte) (err error) {
 	go node.dhtServer()
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	neighbours := getAllNodes(infoHash) //[:K]
+	neighbours := node.getAllNodes(infoHash) //[:K]
 	if len(neighbours) == 0 {
 		return errors.New("zero neighbours")
 	}
@@ -333,13 +377,13 @@ func (node *Node) Run(infoHash []byte) (err error) {
 		if index+K > len(neighbours) {
 			tmpNodes = neighbours[index:]
 			index = 0
-			neighbours = getAllNodes(infoHash)
+			neighbours = node.getAllNodes(infoHash)
 			existNodes = existNodes[:0]
 		} else {
 			tmpNodes = neighbours[index : index+K]
 			index = index + K
 		}
-		peers = GetPeers(tmpNodes, node.ID, infoHash)
+		peers = node.GetPeers(tmpNodes, infoHash)
 		if len(peers) != 0 {
 			for _, p := range peers {
 				//a := net.JoinHostPort(p.IP.String(), strconv.Itoa(p.Port))
@@ -350,7 +394,6 @@ func (node *Node) Run(infoHash []byte) (err error) {
 					//fmt.Println(a, "ok")
 				}
 			}
-
 		}
 	}
 	return nil
@@ -374,8 +417,8 @@ func NodeExist(nodes []Node, target Node) bool {
 
 }
 
-func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
-	getPeers := func(addr string, NodeID, infoHash []byte) ([]Node, []Peer) {
+func (node *Node) GetPeers(nodes []Node, targetID []byte) []Peer {
+	getPeers := func(addr string, infoHash []byte) ([]Node, []Peer) {
 		nodes, peers := make([]Node, 0), make([]Peer, 0)
 		conn, err := Connect(string(addr))
 		if err != nil {
@@ -383,7 +426,7 @@ func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
 		}
 
 		data, _ := MarshalKRPCMessage(
-			KRPCMessage{T: []byte("ww"), Y: "q", Q: getPeers, A: KRPCParam{ID: NodeID, InfoHash: infoHash}})
+			KRPCMessage{T: []byte("ww"), Y: "q", Q: getPeers, A: KRPCParam{ID: node.ID, InfoHash: infoHash}})
 		if err != nil {
 			fmt.Println("MarshalKRPCMessage", err)
 		}
@@ -440,7 +483,7 @@ func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
 				nodes = append(nodes, newNode)
 			}
 			if len(nodes) != 0 {
-				updateKBuket(nodes, targetID)
+				node.Table.updateTable(nodes, targetID)
 			}
 
 		}
@@ -461,7 +504,7 @@ func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
 			defer func() {
 				wg.Done()
 			}()
-			ns, ps := getPeers(addr, nodeId, targetID)
+			ns, ps := getPeers(addr, targetID)
 			peers = append(peers, ps...)
 			if len(ns) != 0 {
 				tmpNodes = append(tmpNodes, ns...)
@@ -482,7 +525,7 @@ func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
 			nodes = nodes[:K]
 		}
 
-		return GetPeers(nodes, nodeId, targetID)
+		return node.GetPeers(nodes, targetID)
 	} else {
 		fmt.Println("tmpNodes empty")
 	}
@@ -490,7 +533,7 @@ func GetPeers(nodes []Node, nodeId, targetID []byte) ([]Peer) {
 	return peers
 }
 
-func FindNodes(addr string, nodeID, targetID [] byte, i int) (nodes []Node, err error) {
+func (node *Node) FindNodes(addr string, targetID []byte, i int) (nodes []Node, err error) {
 	defer func() {
 		wg.Done()
 	}()
@@ -499,7 +542,7 @@ func FindNodes(addr string, nodeID, targetID [] byte, i int) (nodes []Node, err 
 		return nil, err
 	}
 	data, _ := MarshalKRPCMessage(
-		KRPCMessage{T: []byte("ww"), Y: "q", Q: findNode, A: KRPCParam{ID: nodeID, Target: targetID}})
+		KRPCMessage{T: []byte("ww"), Y: "q", Q: findNode, A: KRPCParam{ID: node.ID, Target: targetID}})
 	_, err = conn.Write(data)
 	if err != nil {
 		return nil, err
@@ -533,15 +576,15 @@ func FindNodes(addr string, nodeID, targetID [] byte, i int) (nodes []Node, err 
 			copy(nID, buf[0:20])
 			copy(nIP, buf[20:24])
 			copy(nPort, buf[24:26])
-			distance, _ := Distance(nID, nodeID)
+			distance, _ := Distance(nID, node.ID)
 			index := Index(distance)
 
 			newNode := Node{ID: nID, IP: nIP, Port: int(binary.BigEndian.Uint16(nPort))}
 			nodes = append(nodes, newNode)
-			kBuket := routingTable[index]
+			kBuket := node.Table.Kbuckets[index]
 			if len(kBuket.Neighbours) < K && !NodeExist(kBuket.Neighbours, newNode) {
 				kBuket.Neighbours = append(kBuket.Neighbours, newNode)
-				routingTable[index] = kBuket
+				node.Table.Kbuckets[index] = kBuket
 			}
 		}
 	} else {
