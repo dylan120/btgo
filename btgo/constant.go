@@ -24,4 +24,5 @@ const (
 	EnableDHT = true
 
 	NewConnectionTimeout = 5 * time.Second
+	CacheDir             = "J:\\GO\\test_go\\cache"
 )

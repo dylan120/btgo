@@ -2,6 +2,7 @@ package bencode
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	"io"
@@ -37,7 +38,6 @@ func (e *Encoder) write(s string) {
 		}
 		s = s[n:]
 	}
-
 }
 
 //TODO
@@ -99,6 +99,7 @@ func (e *Encoder) encode(v reflect.Value) (err error) {
 		if v.Type().Key().Kind() != reflect.String { //nil value
 			//continue
 			log.Error("dict keys must be string")
+			err = errors.New("dict keys must be string")
 		} else {
 			if v.IsNil() {
 				e.write("de")
@@ -138,10 +139,9 @@ func (e *Encoder) encode(v reflect.Value) (err error) {
 
 		e.write("e")
 
-	case reflect.Interface:
+	case reflect.Interface, reflect.Ptr:
 		e.encode(v.Elem())
 	}
-
 	return err
 }
 

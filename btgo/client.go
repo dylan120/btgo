@@ -13,7 +13,7 @@ import (
 )
 
 type Client struct {
-	Peer         Peer
+	Peer         *Peer
 	AnnounceList [][]string
 	MetaInfo     MetaInfo
 }
@@ -40,12 +40,10 @@ func NewClient(torrentFile string, savePath string, listenPort int) (*Client, er
 	//fmt.Println("cli.MetaInfo.Info",string(buf))
 	h := sha1.New()
 	h.Write(buf)
-	cli.Peer = Peer{ID: genPeerID(), Port: listenPort,
-		InfoHash: h.Sum(nil), Info: cli.MetaInfo.Info, SavePath: savePath}
+	cli.Peer = NewPeer(listenPort, h.Sum(nil), &cli.MetaInfo.Info, savePath)
 	cli.AnnounceList = t.MetaInfo.AnnounceList
 	//j, _ := json.Marshal(cli.MetaInfo)
 	//fmt.Println(string(j), len(cli.MetaInfo.Info.Pieces))
-	fmt.Printf("%08b", cli.Peer.InfoHash)
 	return &cli, nil
 }
 
@@ -58,7 +56,7 @@ func (cli *Client) RequestTracker() (body []byte, err error) {
 				params := url.Values{}
 				url, err := url.Parse(announce)
 				if err != nil {
-					//fmt.Println(err)
+					fmt.Println(err)
 					continue
 				}
 				//fmt.Printf("cli.Peer.InfoHash %08b",cli.Peer.InfoHash)
@@ -70,7 +68,7 @@ func (cli *Client) RequestTracker() (body []byte, err error) {
 				urlPath := url.String()
 				resp, err := http.Get(urlPath)
 				if err != nil {
-					//fmt.Println(err)
+					fmt.Println(err)
 					continue
 				}
 				defer resp.Body.Close()
@@ -133,33 +131,20 @@ func (cli *Client) Run() (err error) {
 	go cli.RequestTracker()
 	go func() {
 		for peer := range InfoHashPeers[string(cli.Peer.InfoHash)] {
-			go func() {
-				fmt.Println(peer, cli.Peer.InfoHash)
-				cli.Peer.Connect(peer.IP.String(), strconv.Itoa(peer.Port))
-				//if err != nil {
-				//	fmt.Print(err)
-				//}
-			}()
+			_, err = cli.Peer.Connect(peer.IP.String(), strconv.Itoa(peer.Port))
+			if err != nil {
+				continue
+			}
 		}
 	}()
 
 	if EnableDHT {
 		node := NewNode(cli.MetaInfo.Nodes)
-		node.Run(cli.Peer.InfoHash)
+		//return
+		node.Run(cli.Peer.InfoHash, cli.Peer.Port)
 		//peers = InfoHashPeers[string(cli.Peer.InfoHash)]
 	}
-	cli.Peer.Server()
-
-	bitField, err := cli.Peer.VerifyFiles()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-	msg, err := MarshalMessage(Message{ID: BitField, BitField: bitField})
-	fmt.Println("||||>>>>", msg)
-	if err != nil {
-		return err
-	}
+	go cli.Peer.Server()
 
 	select {}
 	return

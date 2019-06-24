@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 )
 
@@ -18,7 +17,7 @@ type Message struct {
 	Block                []byte
 }
 
-func Handshake(conn io.ReadWriter, peerId []byte, infoHash []byte) (msg []byte) {
+func Handshake(conn net.Conn, peerId []byte, infoHash []byte) (err error) {
 	doneChan := make(chan error)
 	sendChan := make(chan []byte, 4)
 
@@ -28,52 +27,61 @@ func Handshake(conn io.ReadWriter, peerId []byte, infoHash []byte) (msg []byte) 
 
 	go SendByte(conn, sendChan, doneChan)
 	fmt.Println("start Handshake")
-	var m []byte
-	m = append(m, []byte("\x13" + ProtocolName)...)
-	m = append(m, make([]byte, 8)...)
-	m = append(m, infoHash...)
-	m = append(m, peerId...)
-	sendChan <- m
+	sendChan <- []byte("\x13" + ProtocolName)
+	reservedByte := make([]byte, 8)
 
-	//sendChan <- []byte("\x13" + ProtocolName)
-	//reservedByte := make([]byte, 8)
-	//
-	//if EnableDHT {
-	//	reservedByte[7] |= 1
-	//}
-	//sendChan <- reservedByte
-	//sendChan <- infoHash
-	//sendChan <- peerId
+	if EnableDHT {
+		reservedByte[7] |= 1
+	}
+	sendChan <- reservedByte
+	sendChan <- infoHash
+	sendChan <- peerId
 
-	buf := make([]byte, 100)
-	n, err := conn.Read(buf)
-	fmt.Println(n, err)
-	return
+	p, reservedBit, _, peerId, err := ParseHandshake(conn)
+	fmt.Println(p, reservedBit)
+
+	return err
 }
 
 func ParseHandshake(conn net.Conn) (clientDesc string, reservedBit []byte,
-	infoHash []byte, peerId []byte, err error) {
+	infoHash []byte, peerID []byte, err error) {
+	//conn.SetReadDeadline(time.Now().Add(1000 * time.Millisecond))
 	buf := make([]byte, 1)
 	_, err = conn.Read(buf)
 	if err != nil {
-		return
+		return "", nil, nil, nil, nil
 	}
 	psLen := int(buf[0])
-	totalByteNum := psLen + HandshakeReservedBitLen + InfoHashLen
-	buf = make([]byte, totalByteNum)
-	err = binary.Read(conn, binary.BigEndian, buf)
+
+	buf = make([]byte, psLen)
+	_, err = conn.Read(buf)
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil
 	}
-	clientDesc = string(buf[:psLen])
-	infoHash = buf[psLen+HandshakeReservedBitLen : totalByteNum]
-	return
+	clientDesc = string(buf[:])
+
+	reservedBit = make([]byte, HandshakeReservedBitLen)
+	_, err = conn.Read(reservedBit)
+	if err != nil {
+		return "", nil, nil, nil, nil
+	}
+	infoHash = make([]byte, 20)
+	_, err = conn.Read(infoHash)
+	if err != nil {
+		return "", nil, nil, nil, nil
+	}
+
+	peerID = make([]byte, 20)
+	_, err = conn.Read(peerID)
+	if err != nil {
+		fmt.Println(err)
+		return "", nil, nil, nil, nil
+	}
+	return clientDesc, reservedBit, infoHash, peerID, nil
 }
 
 func MarshalMessage(msg Message) (data []byte, err error) {
 	buf := &bytes.Buffer{}
-
-	fmt.Print(BitField, msg.ID)
 	err = buf.WriteByte(msg.ID)
 	if err != nil {
 		return
@@ -116,8 +124,8 @@ func MarshalMessage(msg Message) (data []byte, err error) {
 	}
 
 	data = make([]byte, 4+buf.Len())
-	binary.BigEndian.PutUint32(data, uint32(4+buf.Len()))
-	copy(data, buf.Bytes())
+	binary.BigEndian.PutUint32(data, uint32(buf.Len()))
+	copy(data[4:], buf.Bytes())
 	return
 }
 

@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	K        = 8
-	ping     = "ping"
-	findNode = "find_node"
-	getPeers = "get_peers"
+	K            = 8
+	ping         = "ping"
+	findNode     = "find_node"
+	getPeers     = "get_peers"
+	announcePeer = "announce_peer"
 )
 
 type DistanceRange struct {
@@ -55,6 +56,8 @@ type KRPCParam struct {
 	InfoHash []byte `bencode:"info_hash,omitempty"`
 	Target   []byte `bencode:"target,omitempty"`
 	Nodes    string `bencode:"nodes,omitempty"`
+	Port     int    `bencode:"port,omitempty"`
+	Token    []byte `bencode:"token,omitempty"`
 }
 
 type KRPCMessage struct {
@@ -110,6 +113,29 @@ func (table *RoutingTable) updateTable(nodes []Node, targetID []byte) {
 			table.Kbuckets[index] = kBuket
 		}
 	}
+}
+
+func (table *RoutingTable) closedNeighbours(requestID, targetID []byte) ([]Node, error) {
+	distance, err := Distance(requestID, targetID)
+	if err != nil {
+		return nil, err
+	}
+	kBuckets := table.Kbuckets
+	index := Index(distance)
+	neighbours := kBuckets[index].Neighbours
+	length := len(neighbours)
+
+	for i, j := index-1, index+1; length < K; i, j = i-1, j+1 {
+		neighbours = append(neighbours, kBuckets[i].Neighbours...)
+		neighbours = append(neighbours, kBuckets[j].Neighbours...)
+		length = len(neighbours)
+	}
+
+	neighbours = QuickSortByTargetID(neighbours, targetID)
+	if len(neighbours) > K {
+		neighbours = neighbours[:K]
+	}
+	return neighbours, nil
 }
 
 func NewNode(nodeAddrs []NodeAddr) *Node {
@@ -226,29 +252,6 @@ func QuickSortByTargetID(nodes []Node, targetID []byte) []Node {
 	return nodes
 }
 
-func ClosedNeighbours(table *RoutingTable, requestID, targetID []byte) ([]Node, error) {
-	distance, err := Distance(requestID, targetID)
-	if err != nil {
-		return nil, err
-	}
-	kBuckets := table.Kbuckets
-	index := Index(distance)
-	neighbours := kBuckets[index].Neighbours
-	length := len(neighbours)
-
-	for i, j := index-1, index+1; length < K; i, j = i-1, j+1 {
-		neighbours = append(neighbours, kBuckets[i].Neighbours...)
-		neighbours = append(neighbours, kBuckets[j].Neighbours...)
-		length = len(neighbours)
-	}
-
-	neighbours = QuickSortByTargetID(neighbours, targetID)
-	if len(neighbours) > K {
-		neighbours = neighbours[:K]
-	}
-	return neighbours, nil
-}
-
 func Connect(addr string) (conn *net.UDPConn, err error) {
 	RemoteAddr, err := net.ResolveUDPAddr("udp", addr)
 	conn, err = net.DialUDP("udp", nil, RemoteAddr)
@@ -269,21 +272,22 @@ func (node *Node) Ping() {
 
 func Response(conn *net.UDPConn) (data []byte, err error) {
 	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	for {
-		buf := make([]byte, 65536)
-		n, err := conn.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return data, err
-		}
-		if n < 1024 {
-			data = append(data, buf[0:n]...)
-			break
-		}
-		data = append(data, buf...)
-	}
+	data, err = ReadBytes(conn)
+	//for {
+	//	buf := make([]byte, 65536)
+	//	n, err := conn.Read(buf)
+	//	if err != nil {
+	//		if err == io.EOF {
+	//			break
+	//		}
+	//		return data, err
+	//	}
+	//	if n < 1024 {
+	//		data = append(data, buf[0:n]...)
+	//		break
+	//	}
+	//	data = append(data, buf...)
+	//}
 	return data, nil
 }
 
@@ -334,7 +338,6 @@ func (node *Node) Init(boostNodes []NodeAddr) (err error) {
 		fmt.Println(ioutil.WriteFile(rTableCachePath, b, 0666))
 	} else {
 		fi, err = os.Open(rTableCachePath)
-		fmt.Println(err)
 		defer fi.Close()
 		if err == nil {
 			_, err = fi.Write(b)
@@ -358,7 +361,7 @@ func (node *Node) getAllNodes(infoHash []byte) []Node {
 	return neighbours
 }
 
-func (node *Node) Run(infoHash []byte) (err error) {
+func (node *Node) Run(infoHash []byte, port int) (err error) {
 	go node.dhtServer()
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	neighbours := node.getAllNodes(infoHash) //[:K]
@@ -383,15 +386,11 @@ func (node *Node) Run(infoHash []byte) (err error) {
 			tmpNodes = neighbours[index : index+K]
 			index = index + K
 		}
-		peers = node.GetPeers(tmpNodes, infoHash)
+		peers = node.GetPeers(tmpNodes, infoHash, port)
 		if len(peers) != 0 {
 			for _, p := range peers {
-				//a := net.JoinHostPort(p.IP.String(), strconv.Itoa(p.Port))
-				//_, err = net.DialTimeout("tcp", a, time.Millisecond*500)
-				//fmt.Println(err)
 				if err == nil {
 					InfoHashPeers[string(infoHash)] <- p
-					//fmt.Println(a, "ok")
 				}
 			}
 		}
@@ -417,7 +416,7 @@ func NodeExist(nodes []Node, target Node) bool {
 
 }
 
-func (node *Node) GetPeers(nodes []Node, targetID []byte) []Peer {
+func (node *Node) GetPeers(nodes []Node, targetID []byte, peerPort int) []Peer {
 	getPeers := func(addr string, infoHash []byte) ([]Node, []Peer) {
 		nodes, peers := make([]Node, 0), make([]Peer, 0)
 		conn, err := Connect(string(addr))
@@ -443,9 +442,13 @@ func (node *Node) GetPeers(nodes []Node, targetID []byte) []Peer {
 		bencode.Unmarshal(response, &resp)
 		if len(resp.R.Values) != 0 {
 			//fmt.Println(resp.R.Values)
+			token := make([]byte, 4)
+			node.AnnouncePeer(addr, infoHash, token, peerPort)
+
 			for _, val := range resp.R.Values {
 				ip := make(net.IP, len(val)-2)
 				port := make([]byte, 2)
+				//fmt.Println(resp.R.Token)
 				copy(ip, val[:len(val)-2])
 				if err != nil {
 					fmt.Println(err)
@@ -524,8 +527,7 @@ func (node *Node) GetPeers(nodes []Node, targetID []byte) []Peer {
 		if len(nodes) > K {
 			nodes = nodes[:K]
 		}
-
-		return node.GetPeers(nodes, targetID)
+		return node.GetPeers(nodes, targetID, peerPort)
 	} else {
 		fmt.Println("tmpNodes empty")
 	}
@@ -591,4 +593,34 @@ func (node *Node) FindNodes(addr string, targetID []byte, i int) (nodes []Node, 
 		return nil, errors.New("empty nodes")
 	}
 	return nodes, err
+}
+
+func (node *Node) AnnouncePeer(addr string, infoHash []byte, token []byte, port int) error {
+	//addr := net.JoinHostPort(n.IP.String(), strconv.Itoa(n.Port))
+	conn, err := Connect(string(addr))
+	if err != nil {
+		return err
+	}
+
+	data, _ := MarshalKRPCMessage(
+		KRPCMessage{T: []byte("ww"), Y: "q", Q: announcePeer, A: KRPCParam{ID: node.ID, InfoHash: infoHash, Port: port, Token: token}})
+	if err != nil {
+		fmt.Println(err)
+		fmt.Println("MarshalKRPCMessage", err)
+		return err
+	}
+	_, err = conn.Write(data)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	response, err := Response(conn)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	resp := KRPCResponse{}
+	bencode.Unmarshal(response, &resp)
+	fmt.Println(resp)
+	return err
 }
