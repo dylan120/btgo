@@ -10,12 +10,12 @@ import (
 	"net"
 )
 
-type Block struct {
+type block struct {
 	Index    int
 	SHA1Hash []byte
 }
 
-func ParseBlocks(pieces []byte, pieceLength int64) (p []Block, err error) {
+func ParseBlocks(pieces []byte, pieceLength int64) (p []block, err error) {
 	buf := bytes.NewBuffer(pieces)
 	i := 0
 	for buf, reader := make([]byte, pieceLength), bufio.NewReader(buf); ; {
@@ -26,7 +26,7 @@ func ParseBlocks(pieces []byte, pieceLength int64) (p []Block, err error) {
 			}
 			return
 		}
-		p = append(p, Block{Index: i, SHA1Hash: buf})
+		p = append(p, block{Index: i, SHA1Hash: buf})
 		i += 1
 	}
 	return

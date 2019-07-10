@@ -15,6 +15,7 @@ type Message struct {
 	PieceIndex           uint32
 	BitField             []byte
 	Block                []byte
+	Offset               uint32
 }
 
 func Handshake(conn net.Conn, peerId []byte, infoHash []byte) (err error) {
@@ -89,9 +90,10 @@ func MarshalMessage(msg Message) (data []byte, err error) {
 	switch msg.ID {
 	//case Choke, UnChoke, Interested, NotInterested:
 	case Request:
-		for d := range []uint32{msg.Index, msg.Begin, msg.Length} {
+		for _, d := range []uint32{msg.Index, msg.Begin, msg.Length} {
 			err = binary.Write(buf, binary.BigEndian, d)
 			if err != nil {
+				fmt.Println(err)
 				break
 			}
 		}
@@ -100,7 +102,7 @@ func MarshalMessage(msg Message) (data []byte, err error) {
 		if err != nil {
 			break
 		}
-	case Piece:
+	case Piece_:
 		for d := range []uint32{msg.Index, msg.Begin} {
 			err = binary.Write(buf, binary.BigEndian, d)
 			if err != nil {

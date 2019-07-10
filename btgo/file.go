@@ -23,7 +23,3 @@ func GetFiles(info *Info) (fs []File) {
 	}
 	return fs
 }
-
-func SplitFile() {
-
-}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,9 +20,9 @@ type Client struct {
 }
 
 func genPeerID() []byte {
-	h := sha1.New()
-	h.Write([]byte(time.Now().String()))
-	return h.Sum(nil)
+	b := GenerateID(12)
+	b = append([]byte(ClientName), b...)
+	return b
 }
 
 func NewClient(torrentFile string, savePath string, listenPort int) (*Client, error) {
@@ -131,7 +132,8 @@ func (cli *Client) Run() (err error) {
 	go cli.RequestTracker()
 	go func() {
 		for peer := range InfoHashPeers[string(cli.Peer.InfoHash)] {
-			_, err = cli.Peer.Connect(peer.IP.String(), strconv.Itoa(peer.Port))
+			addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(peer.Port))
+			_, err = cli.Peer.Connect(addr)
 			if err != nil {
 				continue
 			}
@@ -145,7 +147,5 @@ func (cli *Client) Run() (err error) {
 		//peers = InfoHashPeers[string(cli.Peer.InfoHash)]
 	}
 	go cli.Peer.Server()
-
-	select {}
 	return
 }
